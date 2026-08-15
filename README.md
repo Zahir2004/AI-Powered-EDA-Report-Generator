@@ -42,9 +42,9 @@ potentially sensitive row-level data to a third-party API.
 
 ```
 eda_report_generator/
-├── app.py             # Streamlit UI and orchestration
-├── eda_utils.py        # pandas/matplotlib EDA logic (no API calls)
-├── groq_utils.py        # Groq API integration
+├── app.py             
+├── eda_utils.py       
+├── groq_utils.py       
 ├── requirements.txt
 ├── .env.example
 └── README.md
