@@ -42,9 +42,9 @@ potentially sensitive row-level data to a third-party API.
 
 ```
 eda_report_generator/
-├── app.py             
-├── eda_utils.py       
-├── groq_utils.py       
+├── app.py          
+├── eda_utils.py        
+├── groq_utils.py        
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -56,7 +56,7 @@ eda_report_generator/
 
    ```bash
    python -m venv venv
-   source venv/bin/activate        
+   source venv/bin/activate       
    pip install -r requirements.txt
    ```
 
@@ -68,6 +68,8 @@ eda_report_generator/
    `.env` in the project folder and paste your key into it:
 
    ```bash
+   cp .env.example .env
+   # then edit .env:
    # GROQ_API_KEY=your_actual_key_here
    ```
 
@@ -89,14 +91,22 @@ eda_report_generator/
 
 ## Using the app
 
-1. Upload a `.csv`, `.xlsx`, or `.xls` file from the sidebar.
-2. Browse the auto-generated tabs: Overview, Missing Values, Statistics,
-   Correlations, Distributions, Categorical — all computed instantly with
+1. Upload a `.csv`, `.xlsx`, or `.xls` file at the top of the page.
+2. Browse the auto-generated tabs: Overview, Missing, Stats,
+   Correlation, Distributions, Categories — all computed instantly with
    pandas, no API key required for this part.
 3. Click **Generate AI Report** to have Groq write the narrative
    sections based on those statistics.
-4. Click **Download Markdown report** to save the full report (narrative
-   + underlying stats) to disk.
+4. Download the finished report as **PDF**, **Word (.docx)**, or
+   **PowerPoint (.pptx)** — pick whichever suits what you're doing next:
+   - **PDF** — best for just viewing or sharing as-is.
+   - **Word** — best if you want to keep editing the text.
+   - **PowerPoint** — best if you need slides for a presentation (one
+     slide per report section, plus a correlation heatmap slide).
+
+   All three are built from `report_export.py` using pure-Python
+   libraries (`python-docx`, `reportlab`, `python-pptx`) with no system
+   dependencies, so they work on Streamlit Cloud out of the box.
 
 ## Model
 
