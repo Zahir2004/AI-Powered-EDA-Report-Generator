@@ -175,19 +175,17 @@ if st.session_state.narrative:
                "Word (.docx) if you plan to keep editing it. PowerPoint (.pptx) "
                "if you need slides for a presentation.")
 
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    report_title = f"EDA Report — {uploaded_file.name}"
-    stats_text = groq_utils.build_eda_summary_text(
-        overview, missing_df, numeric_summary_df, categorical_summary, corr_df, outliers
-    )
+    generated_at = report_export.format_generated_at(datetime.now())
+    dataset_title = report_export.clean_dataset_title(uploaded_file.name)
     base_name = uploaded_file.name.rsplit(".", 1)[0]
 
     col_pdf, col_docx, col_pptx = st.columns(3)
 
     with col_pdf:
         pdf_bytes = report_export.build_pdf_report(
-            report_title, generated_at, model_name,
-            st.session_state.narrative, stats_text, chart_fig=corr_fig,
+            dataset_title, generated_at, model_name, st.session_state.narrative,
+            overview, missing_df, numeric_summary_df, categorical_summary,
+            corr_df, outliers, chart_fig=corr_fig,
         )
         st.download_button(
             "📄 Download PDF", data=pdf_bytes,
@@ -197,8 +195,9 @@ if st.session_state.narrative:
 
     with col_docx:
         docx_bytes = report_export.build_docx_report(
-            report_title, generated_at, model_name,
-            st.session_state.narrative, stats_text, chart_fig=corr_fig,
+            dataset_title, generated_at, model_name, st.session_state.narrative,
+            overview, missing_df, numeric_summary_df, categorical_summary,
+            corr_df, outliers, chart_fig=corr_fig,
         )
         st.download_button(
             "📝 Download Word", data=docx_bytes,
@@ -209,8 +208,8 @@ if st.session_state.narrative:
 
     with col_pptx:
         pptx_bytes = report_export.build_pptx_report(
-            report_title, generated_at, model_name,
-            st.session_state.narrative, chart_fig=corr_fig,
+            dataset_title, generated_at, model_name, st.session_state.narrative,
+            overview, chart_fig=corr_fig,
         )
         st.download_button(
             "📊 Download PPT", data=pptx_bytes,
