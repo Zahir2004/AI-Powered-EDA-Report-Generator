@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 import eda_utils
 import groq_utils
+import report_export
 
 load_dotenv()  # loads GROQ_API_KEY from a local .env file into the environment
 
@@ -170,19 +171,50 @@ if st.session_state.narrative:
 
     st.markdown("---")
     st.subheader("⬇️ Download Report")
+    st.caption("PDF is the safest choice if you just want to view or share it. "
+               "Word (.docx) if you plan to keep editing it. PowerPoint (.pptx) "
+               "if you need slides for a presentation.")
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    md_report = (
-        f"# EDA Report — {uploaded_file.name}\n"
-        f"_Generated {generated_at} using {model_name}_\n\n"
-        f"{st.session_state.narrative}\n\n"
-        "---\n## Computed Statistics\n\n"
-        f"```\n{groq_utils.build_eda_summary_text(overview, missing_df, numeric_summary_df, categorical_summary, corr_df, outliers)}\n```\n"
+    report_title = f"EDA Report — {uploaded_file.name}"
+    stats_text = groq_utils.build_eda_summary_text(
+        overview, missing_df, numeric_summary_df, categorical_summary, corr_df, outliers
     )
+    base_name = uploaded_file.name.rsplit(".", 1)[0]
 
-    st.download_button(
-        "Download Markdown report",
-        data=md_report,
-        file_name=f"eda_report_{uploaded_file.name.rsplit('.', 1)[0]}.md",
-        mime="text/markdown",
-    )
+    col_pdf, col_docx, col_pptx = st.columns(3)
+
+    with col_pdf:
+        pdf_bytes = report_export.build_pdf_report(
+            report_title, generated_at, model_name,
+            st.session_state.narrative, stats_text, chart_fig=corr_fig,
+        )
+        st.download_button(
+            "📄 Download PDF", data=pdf_bytes,
+            file_name=f"eda_report_{base_name}.pdf", mime="application/pdf",
+            use_container_width=True,
+        )
+
+    with col_docx:
+        docx_bytes = report_export.build_docx_report(
+            report_title, generated_at, model_name,
+            st.session_state.narrative, stats_text, chart_fig=corr_fig,
+        )
+        st.download_button(
+            "📝 Download Word", data=docx_bytes,
+            file_name=f"eda_report_{base_name}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+
+    with col_pptx:
+        pptx_bytes = report_export.build_pptx_report(
+            report_title, generated_at, model_name,
+            st.session_state.narrative, chart_fig=corr_fig,
+        )
+        st.download_button(
+            "📊 Download PPT", data=pptx_bytes,
+            file_name=f"eda_report_{base_name}.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            use_container_width=True,
+        )
