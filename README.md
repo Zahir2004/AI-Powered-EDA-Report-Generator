@@ -56,7 +56,7 @@ eda_report_generator/
 
    ```bash
    python -m venv venv
-   source venv/bin/activate        # Windows: venv\Scripts\activate
+   source venv/bin/activate        
    pip install -r requirements.txt
    ```
 
@@ -68,8 +68,6 @@ eda_report_generator/
    `.env` in the project folder and paste your key into it:
 
    ```bash
-   cp .env.example .env
-   # then edit .env:
    # GROQ_API_KEY=your_actual_key_here
    ```
 
@@ -81,7 +79,7 @@ eda_report_generator/
 4. **Run the app**:
 
    ```bash
-   streamlit run app.py
+   python -m streamlit run app.py
    ```
 
    Streamlit will open the app at `http://localhost:8501`. If
