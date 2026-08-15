@@ -25,14 +25,6 @@ st.set_page_config(page_title="AI-Powered EDA Report Generator", layout="wide")
 api_key = os.getenv("GROQ_API_KEY", "")
 model_name = groq_utils.DEFAULT_MODEL  # fixed to the fastest, free-tier-friendly model
 
-# --------------------------------------------------------------------------
-# Sidebar: upload only
-# --------------------------------------------------------------------------
-st.sidebar.title("Upload")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload a CSV or Excel file", type=["csv", "xlsx", "xls"]
-)
-
 st.title("📊 AI-Powered EDA Report Generator")
 st.caption("Upload a CSV/Excel file to get an automated statistical EDA, "
            f"plus an AI-written narrative summary from Groq ({model_name}).")
@@ -45,8 +37,17 @@ if not api_key:
         "AI narrative section needs it."
     )
 
+# --------------------------------------------------------------------------
+# Upload (kept in the main body, not the sidebar, so it's immediately
+# visible on mobile — the sidebar starts collapsed on phones and is easy
+# to miss).
+# --------------------------------------------------------------------------
+uploaded_file = st.file_uploader(
+    "Upload a CSV or Excel file", type=["csv", "xlsx", "xls"]
+)
+
 if not uploaded_file:
-    st.info("Upload a file from the sidebar to get started.")
+    st.info("Upload a file above to get started.")
     st.stop()
 
 # --------------------------------------------------------------------------
@@ -76,7 +77,7 @@ corr_df = eda_utils.get_correlation_matrix(df)
 outliers = eda_utils.detect_outliers_iqr(df)
 
 tab_overview, tab_missing, tab_stats, tab_corr, tab_dist, tab_cat = st.tabs(
-    ["Overview", "Missing Values", "Statistics", "Correlations", "Distributions", "Categorical"]
+    ["Overview", "Missing", "Stats", "Correlation", "Distributions", "Categories"]
 )
 
 with tab_overview:
