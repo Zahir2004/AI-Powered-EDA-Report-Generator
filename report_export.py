@@ -1,41 +1,68 @@
 """
 report_export.py
 -----------------
-Turns the AI narrative (Markdown from Groq) + computed statistics into
-DOCX, PDF, and PPTX files, each returned as raw bytes ready to hand to
-st.download_button. All three read the same input, so the content is
-consistent across formats - only the layout differs.
+Turns the AI narrative (Markdown from Groq) + the actual computed
+statistics (DataFrames/dicts, not flattened text) into professional
+DOCX, PDF, and PPTX files, each returned as raw bytes ready for
+st.download_button.
+
+All three build genuine tables for the statistics (not a monospace dump
+of the LLM prompt text), a clean title page, and real bold formatting
+for **markdown emphasis** in the narrative - instead of showing literal
+'#' / '**' characters.
 
 Kept dependency-light on purpose:
 - DOCX: python-docx
-- PDF:  reportlab (pure Python, no system binaries needed - unlike
-        weasyprint/wkhtmltopdf, this installs cleanly on Streamlit Cloud)
+- PDF:  reportlab (pure Python, no system binaries - installs cleanly
+        on Streamlit Cloud, unlike weasyprint/wkhtmltopdf)
 - PPTX: python-pptx
 """
 
 import io
 import re
+from datetime import datetime
 
 from docx import Document
-from docx.shared import Pt, Inches as DocxInches
+from docx.shared import Pt, Inches as DocxInches, RGBColor as DocxRGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.lib import colors
+from reportlab.lib import colors as rl_colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image as RLImage,
-    ListFlowable, ListItem, Preformatted,
+    ListFlowable, ListItem, Table, TableStyle, HRFlowable,
 )
 
 from pptx import Presentation
-from pptx.util import Inches as PptxInches, Pt as PptxPt
+from pptx.util import Inches as PptxInches, Pt as PptxPt, Emu
+from pptx.dml.color import RGBColor as PptxRGBColor
+from pptx.enum.text import PP_ALIGN
+
+# Shared "brand" color used across all three formats for a consistent look
+ACCENT_HEX = "1F4E79"        # navy blue
+ACCENT_RL = rl_colors.HexColor(f"#{ACCENT_HEX}")
+ACCENT_DOCX = DocxRGBColor(0x1F, 0x4E, 0x79)
+ACCENT_PPTX = PptxRGBColor(0x1F, 0x4E, 0x79)
+LIGHT_BAND_RL = rl_colors.HexColor("#EEF3F8")
 
 
 # --------------------------------------------------------------------------
-# Shared markdown parsing (turns Groq's "## Heading" / "- bullet" style
-# Markdown into a simple structure every format can render its own way)
+# Small shared helpers
 # --------------------------------------------------------------------------
+def clean_dataset_title(filename: str) -> str:
+    """'hotel_dataset (5).xlsx' -> 'Hotel Dataset'"""
+    name = re.sub(r"\.[^.]+$", "", filename)          # drop extension
+    name = re.sub(r"\s*\(\d+\)\s*$", "", name)          # drop ' (5)' duplicate suffix
+    name = re.sub(r"[_\-]+", " ", name).strip()
+    return name.title() if name else "Dataset"
+
+
+def format_generated_at(dt: datetime) -> str:
+    return dt.strftime("%d %B %Y, %H:%M")
+
+
 def _parse_markdown_sections(markdown_text: str):
     """Split into [(heading_or_None, [raw_lines]), ...] on '## ' headings."""
     sections = []
@@ -53,7 +80,7 @@ def _parse_markdown_sections(markdown_text: str):
 
 
 def _blocks_from_lines(lines):
-    """Within a section, group into ('bullets', [items]) / ('para', text) blocks."""
+    """Group section lines into ('bullets', [items]) / ('para', text) blocks."""
     blocks, bullet_buf, para_buf = [], [], []
 
     def flush():
@@ -82,137 +109,409 @@ def _blocks_from_lines(lines):
     return blocks
 
 
-def _strip_markdown_emphasis(text: str) -> str:
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    text = re.sub(r"\*(.+?)\*", r"\1", text)
-    return text
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _split_bold_segments(text: str):
+    """'**A** and B' -> [('A', True), (' and B', False)]"""
+    segments, pos = [], 0
+    for m in _BOLD_RE.finditer(text):
+        if m.start() > pos:
+            segments.append((text[pos:m.start()], False))
+        segments.append((m.group(1), True))
+        pos = m.end()
+    if pos < len(text):
+        segments.append((text[pos:], False))
+    return segments or [(text, False)]
+
+
+def _markdown_to_reportlab_markup(text: str) -> str:
+    """Escape XML specials, then turn **bold** into <b>bold</b> (ReportLab's
+    Paragraph accepts a small HTML-like markup)."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _BOLD_RE.sub(r"<b>\1</b>", text)
+
+
+def _fmt_num(value, is_count=False) -> str:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if is_count:
+        return f"{f:,.0f}"
+    return f"{f:,.2f}"
+
+
+def _render_fig_png(fig, dpi=150):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    buf.seek(0)
+    return buf
 
 
 # --------------------------------------------------------------------------
-# DOCX
+# Shared: build plain "overview metrics" rows used by all three formats
 # --------------------------------------------------------------------------
-def build_docx_report(title, generated_at, model_name, narrative_md, stats_text, chart_fig=None) -> bytes:
-    doc = Document()
+def _overview_rows(overview: dict):
+    return [
+        ("Rows", f"{overview['rows']:,}"),
+        ("Columns", f"{overview['columns']:,}"),
+        ("Duplicate rows", f"{overview['duplicate_rows']:,}"),
+        ("Numeric columns", str(len(overview["numeric_columns"])) or "0"),
+        ("Categorical columns", str(len(overview["categorical_columns"])) or "0"),
+    ]
 
-    doc.add_heading(title, level=0)
-    meta = doc.add_paragraph()
-    meta.add_run(f"Generated {generated_at} using {model_name}").italic = True
 
+# ==========================================================================
+# PDF (reportlab)
+# ==========================================================================
+def build_pdf_report(dataset_title, generated_at, model_name, narrative_md,
+                      overview, missing_df, numeric_summary_df,
+                      categorical_summary, corr_df, outliers, chart_fig=None) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER,
+                             topMargin=0.7 * inch, bottomMargin=0.7 * inch,
+                             leftMargin=0.7 * inch, rightMargin=0.7 * inch)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("title", parent=styles["Title"], textColor=ACCENT_RL, fontSize=24, spaceAfter=4)
+    subtitle_style = ParagraphStyle("subtitle", parent=styles["Normal"], textColor=rl_colors.grey, fontSize=10, spaceAfter=16)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], textColor=ACCENT_RL, spaceBefore=16, spaceAfter=8)
+    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=10, leading=14)
+
+    def table_style(header_bg=ACCENT_RL):
+        return TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+            ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, LIGHT_BAND_RL]),
+            ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ])
+
+    story = [
+        Paragraph(f"{dataset_title} — Exploratory Data Analysis Report", title_style),
+        Paragraph(f"Generated {generated_at}  ·  Powered by Groq ({model_name})", subtitle_style),
+        HRFlowable(width="100%", thickness=1, color=ACCENT_RL, spaceAfter=14),
+    ]
+
+    # Overview table
+    story.append(Paragraph("Dataset Overview", h2))
+    ov_rows = [["Metric", "Value"]] + [[k, v] for k, v in _overview_rows(overview)]
+    t = Table(ov_rows, colWidths=[2.5 * inch, 3 * inch])
+    t.setStyle(table_style())
+    story.append(t)
+
+    # AI narrative
+    story.append(Paragraph("AI-Generated Insights", h2))
     for heading, lines in _parse_markdown_sections(narrative_md):
         if heading:
-            doc.add_heading(heading, level=1)
+            story.append(Paragraph(heading, ParagraphStyle("h3", parent=styles["Heading3"], textColor=rl_colors.HexColor("#334155"))))
+        for kind, content in _blocks_from_lines(lines):
+            if kind == "bullets":
+                items = [ListItem(Paragraph(_markdown_to_reportlab_markup(i), body)) for i in content]
+                story.append(ListFlowable(items, bulletType="bullet", leftIndent=16, bulletColor=ACCENT_RL))
+            else:
+                story.append(Paragraph(_markdown_to_reportlab_markup(content), body))
+        story.append(Spacer(1, 6))
+
+    # Missing values
+    story.append(Paragraph("Missing Values", h2))
+    if missing_df is None or missing_df.empty:
+        story.append(Paragraph("No missing values were detected in any column.", body))
+    else:
+        rows = [["Column", "Missing Count", "Missing %"]]
+        for col, r in missing_df.iterrows():
+            rows.append([str(col), f"{int(r['missing_count']):,}", f"{r['missing_pct']}%"])
+        t = Table(rows, colWidths=[2.5 * inch, 1.5 * inch, 1.5 * inch])
+        t.setStyle(table_style())
+        story.append(t)
+
+    # Numeric statistics
+    if numeric_summary_df is not None and not numeric_summary_df.empty:
+        story.append(Paragraph("Numeric Column Statistics", h2))
+        cols = list(numeric_summary_df.columns)
+        rows = [["Column"] + cols]
+        for col, r in numeric_summary_df.iterrows():
+            row = [str(col)] + [_fmt_num(r[c], is_count=(c == "count")) for c in cols]
+            rows.append(row)
+        t = Table(rows, colWidths=[1.3 * inch] + [0.72 * inch] * len(cols))
+        t.setStyle(table_style())
+        story.append(t)
+
+    # Categorical summary
+    if categorical_summary:
+        story.append(Paragraph("Categorical Column Summary", h2))
+        rows = [["Column", "Unique Values", "Top Values"]]
+        for col, info in categorical_summary.items():
+            top = ", ".join(f"{k} ({v})" for k, v in list(info["top_values"].items())[:3])
+            rows.append([col, str(info["unique_values"]), top])
+        t = Table(rows, colWidths=[1.6 * inch, 1.1 * inch, 3.3 * inch])
+        t.setStyle(table_style())
+        story.append(t)
+
+    # Correlation
+    if corr_df is not None and not corr_df.empty:
+        story.append(Paragraph("Correlation Matrix", h2))
+        cols = list(corr_df.columns)
+        rows = [[""] + cols]
+        for col in corr_df.index:
+            rows.append([col] + [f"{corr_df.loc[col, c]:.2f}" for c in cols])
+        col_w = min(0.85 * inch, 6 * inch / (len(cols) + 1))
+        t = Table(rows, colWidths=[1.1 * inch] + [col_w] * len(cols))
+        t.setStyle(table_style())
+        story.append(t)
+
+        if chart_fig is not None:
+            story.append(Spacer(1, 10))
+            story.append(RLImage(_render_fig_png(chart_fig), width=6 * inch, height=4.2 * inch, kind="proportional"))
+
+    # Outliers
+    if outliers:
+        story.append(Paragraph("Potential Outliers (IQR rule)", h2))
+        rows = [["Column", "Count", "% of values"]]
+        for col, info in outliers.items():
+            rows.append([col, str(info["count"]), f"{info['pct']}%"])
+        t = Table(rows, colWidths=[2.5 * inch, 1.5 * inch, 1.5 * inch])
+        t.setStyle(table_style())
+        story.append(t)
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ==========================================================================
+# DOCX
+# ==========================================================================
+def _docx_add_runs(paragraph, text, base_color=None):
+    for segment, is_bold in _split_bold_segments(text):
+        run = paragraph.add_run(segment)
+        run.bold = is_bold
+        if base_color:
+            run.font.color.rgb = base_color
+
+
+def _docx_table(doc, headers, rows, widths=None):
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Light Grid Accent 1"
+    for i, h in enumerate(headers):
+        cell = table.rows[0].cells[i]
+        cell.text = ""
+        run = cell.paragraphs[0].add_run(h)
+        run.bold = True
+    for row in rows:
+        cells = table.add_row().cells
+        for i, val in enumerate(row):
+            cells[i].text = str(val)
+    return table
+
+
+def build_docx_report(dataset_title, generated_at, model_name, narrative_md,
+                       overview, missing_df, numeric_summary_df,
+                       categorical_summary, corr_df, outliers, chart_fig=None) -> bytes:
+    doc = Document()
+
+    title_p = doc.add_heading(level=0)
+    title_run = title_p.add_run(f"{dataset_title} — Exploratory Data Analysis Report")
+    title_run.font.color.rgb = ACCENT_DOCX
+
+    meta_p = doc.add_paragraph()
+    meta_run = meta_p.add_run(f"Generated {generated_at}  ·  Powered by Groq ({model_name})")
+    meta_run.italic = True
+    meta_run.font.size = Pt(9)
+    meta_run.font.color.rgb = DocxRGBColor(0x64, 0x74, 0x8B)
+
+    doc.add_heading("Dataset Overview", level=1)
+    _docx_table(doc, ["Metric", "Value"], _overview_rows(overview))
+
+    doc.add_heading("AI-Generated Insights", level=1)
+    for heading, lines in _parse_markdown_sections(narrative_md):
+        if heading:
+            doc.add_heading(heading, level=2)
         for kind, content in _blocks_from_lines(lines):
             if kind == "bullets":
                 for item in content:
-                    doc.add_paragraph(_strip_markdown_emphasis(item), style="List Bullet")
+                    p = doc.add_paragraph(style="List Bullet")
+                    _docx_add_runs(p, item)
             else:
-                doc.add_paragraph(_strip_markdown_emphasis(content))
+                p = doc.add_paragraph()
+                _docx_add_runs(p, content)
 
-    if chart_fig is not None:
-        doc.add_heading("Correlation Heatmap", level=1)
-        img_buf = io.BytesIO()
-        chart_fig.savefig(img_buf, format="png", dpi=150, bbox_inches="tight")
-        img_buf.seek(0)
-        doc.add_picture(img_buf, width=DocxInches(6))
+    doc.add_heading("Missing Values", level=1)
+    if missing_df is None or missing_df.empty:
+        doc.add_paragraph("No missing values were detected in any column.")
+    else:
+        rows = [[col, f"{int(r['missing_count']):,}", f"{r['missing_pct']}%"] for col, r in missing_df.iterrows()]
+        _docx_table(doc, ["Column", "Missing Count", "Missing %"], rows)
 
-    doc.add_heading("Computed Statistics", level=1)
-    run = doc.add_paragraph().add_run(stats_text)
-    run.font.name = "Courier New"
-    run.font.size = Pt(8)
+    if numeric_summary_df is not None and not numeric_summary_df.empty:
+        doc.add_heading("Numeric Column Statistics", level=1)
+        cols = list(numeric_summary_df.columns)
+        rows = [[col] + [_fmt_num(r[c], is_count=(c == "count")) for c in cols] for col, r in numeric_summary_df.iterrows()]
+        _docx_table(doc, ["Column"] + cols, rows)
+
+    if categorical_summary:
+        doc.add_heading("Categorical Column Summary", level=1)
+        rows = []
+        for col, info in categorical_summary.items():
+            top = ", ".join(f"{k} ({v})" for k, v in list(info["top_values"].items())[:3])
+            rows.append([col, str(info["unique_values"]), top])
+        _docx_table(doc, ["Column", "Unique Values", "Top Values"], rows)
+
+    if corr_df is not None and not corr_df.empty:
+        doc.add_heading("Correlation Matrix", level=1)
+        cols = list(corr_df.columns)
+        rows = [[col] + [f"{corr_df.loc[col, c]:.2f}" for c in cols] for col in corr_df.index]
+        _docx_table(doc, [""] + cols, rows)
+
+        if chart_fig is not None:
+            doc.add_paragraph()
+            doc.add_picture(_render_fig_png(chart_fig), width=DocxInches(6))
+
+    if outliers:
+        doc.add_heading("Potential Outliers (IQR rule)", level=1)
+        rows = [[col, str(info["count"]), f"{info['pct']}%"] for col, info in outliers.items()]
+        _docx_table(doc, ["Column", "Count", "% of values"], rows)
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
-# --------------------------------------------------------------------------
-# PDF (reportlab)
-# --------------------------------------------------------------------------
-def build_pdf_report(title, generated_at, model_name, narrative_md, stats_text, chart_fig=None) -> bytes:
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=LETTER, topMargin=0.75 * inch, bottomMargin=0.75 * inch)
-    styles = getSampleStyleSheet()
-    meta_style = ParagraphStyle("meta", parent=styles["Normal"], textColor=colors.grey, spaceAfter=14)
-
-    story = [Paragraph(title, styles["Title"]),
-             Paragraph(f"Generated {generated_at} using {model_name}", meta_style)]
-
-    for heading, lines in _parse_markdown_sections(narrative_md):
-        if heading:
-            story.append(Paragraph(heading, styles["Heading2"]))
-        for kind, content in _blocks_from_lines(lines):
-            if kind == "bullets":
-                items = [ListItem(Paragraph(_strip_markdown_emphasis(i), styles["Normal"])) for i in content]
-                story.append(ListFlowable(items, bulletType="bullet", leftIndent=18))
-            else:
-                story.append(Paragraph(_strip_markdown_emphasis(content), styles["Normal"]))
-        story.append(Spacer(1, 10))
-
-    if chart_fig is not None:
-        img_buf = io.BytesIO()
-        chart_fig.savefig(img_buf, format="png", dpi=150, bbox_inches="tight")
-        img_buf.seek(0)
-        story.append(Paragraph("Correlation Heatmap", styles["Heading2"]))
-        story.append(RLImage(img_buf, width=6 * inch, height=4.2 * inch, kind="proportional"))
-        story.append(Spacer(1, 10))
-
-    story.append(Paragraph("Computed Statistics", styles["Heading2"]))
-    code_style = ParagraphStyle("code", parent=styles["Code"], fontSize=6.5, leading=8)
-    story.append(Preformatted(stats_text, code_style))
-
-    doc.build(story)
-    return buf.getvalue()
+# ==========================================================================
+# PPTX - designed to be presented as-is
+# ==========================================================================
+SLIDE_W_IN, SLIDE_H_IN = 13.333, 7.5  # 16:9
 
 
-# --------------------------------------------------------------------------
-# PPTX
-# --------------------------------------------------------------------------
-def build_pptx_report(title, generated_at, model_name, narrative_md, chart_fig=None) -> bytes:
+def _pptx_accent_bar(slide, prs, y_in=0, height_in=1.15):
+    bar = slide.shapes.add_shape(1, PptxInches(0), PptxInches(y_in), PptxInches(SLIDE_W_IN), PptxInches(height_in))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = ACCENT_PPTX
+    bar.line.fill.background()
+    bar.shadow.inherit = False
+    return bar
+
+
+def _pptx_title_text(slide, text, top_in, left_in=0.6, width_in=SLIDE_W_IN - 1.2,
+                      size=28, color=PptxRGBColor(0xFF, 0xFF, 0xFF), bold=True, align=PP_ALIGN.LEFT):
+    box = slide.shapes.add_textbox(PptxInches(left_in), PptxInches(top_in), PptxInches(width_in), PptxInches(0.9))
+    tf = box.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.alignment = align
+    run = p.add_run()
+    run.text = text
+    run.font.size = PptxPt(size)
+    run.font.bold = bold
+    run.font.color.rgb = color
+    return box
+
+
+def _pptx_bullet_slide(prs, heading, items):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    _pptx_accent_bar(slide, prs)
+    _pptx_title_text(slide, heading or "Summary", top_in=0.28, size=26)
+
+    box = slide.shapes.add_textbox(PptxInches(0.7), PptxInches(1.5), PptxInches(SLIDE_W_IN - 1.4), PptxInches(5.5))
+    tf = box.text_frame
+    tf.word_wrap = True
+    first = True
+    for item in items[:8]:  # cap so slides stay readable
+        p = tf.paragraphs[0] if first else tf.add_paragraph()
+        first = False
+        p.level = 0
+        p.space_after = PptxPt(10)
+        bullet_run = p.add_run()
+        bullet_run.text = "●  "
+        bullet_run.font.size = PptxPt(18)
+        bullet_run.font.color.rgb = ACCENT_PPTX
+        bullet_run.font.bold = True
+        for segment, is_bold in _split_bold_segments(item):
+            run = p.add_run()
+            run.text = segment
+            run.font.size = PptxPt(18)
+            run.font.bold = is_bold
+            run.font.color.rgb = PptxRGBColor(0x33, 0x33, 0x33)
+    return slide
+
+
+def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
+                       overview, chart_fig=None) -> bytes:
     prs = Presentation()
+    prs.slide_width = Emu(int(SLIDE_W_IN * 914400))
+    prs.slide_height = Emu(int(SLIDE_H_IN * 914400))
     blank = prs.slide_layouts[6]
-    title_layout = prs.slide_layouts[0]
-    bullet_layout = prs.slide_layouts[1]
 
-    # Title slide
-    slide = prs.slides.add_slide(title_layout)
-    slide.shapes.title.text = title
-    slide.placeholders[1].text = f"Generated {generated_at} using {model_name}"
+    # --- Title slide ---------------------------------------------------
+    slide = prs.slides.add_slide(blank)
+    bg = slide.shapes.add_shape(1, PptxInches(0), PptxInches(0), PptxInches(SLIDE_W_IN), PptxInches(SLIDE_H_IN))
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = ACCENT_PPTX
+    bg.line.fill.background()
+    bg.shadow.inherit = False
 
-    # One slide per narrative section
+    _pptx_title_text(slide, dataset_title, top_in=2.5, size=40, align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+    _pptx_title_text(slide, "Exploratory Data Analysis Report", top_in=3.4, size=22, bold=False,
+                      color=PptxRGBColor(0xD9, 0xE6, 0xF2), align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+    _pptx_title_text(slide, f"Generated {generated_at}  ·  Powered by Groq ({model_name})",
+                      top_in=4.3, size=13, bold=False, color=PptxRGBColor(0xB8, 0xCC, 0xE0),
+                      align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+
+    # --- Key statistics slide ------------------------------------------
+    slide = prs.slides.add_slide(blank)
+    _pptx_accent_bar(slide, prs)
+    _pptx_title_text(slide, "Key Statistics", top_in=0.28, size=26)
+
+    rows = _overview_rows(overview)
+    rows_n, cols_n = len(rows) + 1, 2
+    table_shape = slide.shapes.add_table(rows_n, cols_n, PptxInches(2.5), PptxInches(1.8),
+                                          PptxInches(SLIDE_W_IN - 5), PptxInches(0.6 * rows_n))
+    table = table_shape.table
+    table.cell(0, 0).text, table.cell(0, 1).text = "Metric", "Value"
+    for c in (0, 1):
+        cell = table.cell(0, c)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = ACCENT_PPTX
+        for p in cell.text_frame.paragraphs:
+            for r in p.runs:
+                r.font.color.rgb = PptxRGBColor(0xFF, 0xFF, 0xFF)
+                r.font.bold = True
+    for i, (k, v) in enumerate(rows, start=1):
+        table.cell(i, 0).text, table.cell(i, 1).text = k, v
+
+    # --- One slide per narrative section --------------------------------
     for heading, lines in _parse_markdown_sections(narrative_md):
         blocks = _blocks_from_lines(lines)
-        bullet_items = []
+        items = []
         for kind, content in blocks:
             if kind == "bullets":
-                bullet_items.extend(content)
+                items.extend(content)
             else:
-                # wrap long paragraphs onto the slide as a single bullet
-                bullet_items.append(content)
-        if not bullet_items:
-            continue
+                items.append(content)
+        if items:
+            _pptx_bullet_slide(prs, heading, items)
 
-        slide = prs.slides.add_slide(bullet_layout)
-        slide.shapes.title.text = heading or "Summary"
-        body = slide.placeholders[1].text_frame
-        body.clear()
-        body.text = _strip_markdown_emphasis(bullet_items[0])[:400]
-        for item in bullet_items[1:8]:  # cap to keep slides readable
-            p = body.add_paragraph()
-            p.text = _strip_markdown_emphasis(item)[:400]
-            p.level = 0
-
-    # Optional chart slide
+    # --- Correlation heatmap slide ---------------------------------------
     if chart_fig is not None:
         slide = prs.slides.add_slide(blank)
-        tx = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.3), PptxInches(9), PptxInches(0.6))
-        tx.text_frame.text = "Correlation Heatmap"
-        tx.text_frame.paragraphs[0].font.size = PptxPt(28)
-        tx.text_frame.paragraphs[0].font.bold = True
+        _pptx_accent_bar(slide, prs)
+        _pptx_title_text(slide, "Correlation Heatmap", top_in=0.28, size=26)
+        slide.shapes.add_picture(_render_fig_png(chart_fig), PptxInches(2), PptxInches(1.4),
+                                  width=PptxInches(SLIDE_W_IN - 4))
 
-        img_buf = io.BytesIO()
-        chart_fig.savefig(img_buf, format="png", dpi=150, bbox_inches="tight")
-        img_buf.seek(0)
-        slide.shapes.add_picture(img_buf, PptxInches(1), PptxInches(1.1), width=PptxInches(8))
+    # --- Closing slide -----------------------------------------------------
+    slide = prs.slides.add_slide(blank)
+    bg = slide.shapes.add_shape(1, PptxInches(0), PptxInches(0), PptxInches(SLIDE_W_IN), PptxInches(SLIDE_H_IN))
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = ACCENT_PPTX
+    bg.line.fill.background()
+    bg.shadow.inherit = False
+    _pptx_title_text(slide, "Thank You", top_in=3.0, size=36, align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+    _pptx_title_text(slide, f"{dataset_title} — EDA Report", top_in=3.9, size=16, bold=False,
+                      color=PptxRGBColor(0xD9, 0xE6, 0xF2), align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
 
     buf = io.BytesIO()
     prs.save(buf)
