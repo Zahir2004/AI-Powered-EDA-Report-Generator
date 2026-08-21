@@ -22,7 +22,7 @@ from groq import Groq
 # llama-3.3-70b-versatile: Groq's well-established, fast, free-tier model -
 # a strong default for narrative/report writing. If you want more speed
 # and don't mind slightly less nuance, swap to "llama-3.1-8b-instant".
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 SYSTEM_INSTRUCTION = (
     "You are a senior data analyst writing the narrative section of an "
