@@ -1,4 +1,6 @@
-# AI-Powered EDA Report Generator
+# AI-Powered EDA Report Generator                
+
+**Live Demonstraton:** https://ai-powered-eda-report-generator.streamlit.app/
 
 A Streamlit app that takes a CSV or Excel file, runs a full statistical
 exploratory data analysis (EDA) locally with pandas, and then uses the
