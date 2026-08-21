@@ -209,7 +209,7 @@ if st.session_state.narrative:
     with col_pptx:
         pptx_bytes = report_export.build_pptx_report(
             dataset_title, generated_at, model_name, st.session_state.narrative,
-            overview, chart_fig=corr_fig,
+            overview, chart_fig=corr_fig, hist_figs=hist_figs, bar_figs=bar_figs,
         )
         st.download_button(
             "📊 Download PPT", data=pptx_bytes,
