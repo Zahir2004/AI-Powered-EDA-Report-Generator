@@ -156,3 +156,24 @@ for the current full list if a model here has been retired.
   capped at 12 numeric and 8 categorical columns by default; you can
   lower `MAX_NUMERIC_PLOTS` / `MAX_CATEGORICAL_PLOTS` in `eda_utils.py`
   for very wide datasets.
+## Project Repository
+
+https://github.com/Zahir2004/ai-powered-eda-report-generator
+
+## Author
+
+**Sk. Zahir Hossain**
+
+Computer Science and Engineering
+
+GitHub: https://github.com/Zahir2004
+
+LinkedIn: https://www.linkedin.com/in/sk-zahir-hossain/
+
+## Project Type
+
+Personal Project
+
+## License
+
+This project was developed as a personal project for learning and demonstrating practical skills in Data Analysis, Exploratory Data Analysis, Python, Streamlit, and AI powered data insights.
