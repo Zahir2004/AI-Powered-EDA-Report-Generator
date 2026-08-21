@@ -266,7 +266,7 @@ def build_pdf_report(dataset_title, generated_at, model_name, narrative_md,
 
         if chart_fig is not None:
             story.append(Spacer(1, 10))
-            story.append(RLImage(_render_fig_png(chart_fig), width=6 * inch, height=4.2 * inch, kind="proportional"))
+            story.append(RLImage(_render_fig_png(chart_fig), width=5.5 * inch, height=3.85 * inch, kind="proportional"))
 
     # Outliers
     if outliers:
@@ -368,7 +368,7 @@ def build_docx_report(dataset_title, generated_at, model_name, narrative_md,
 
         if chart_fig is not None:
             doc.add_paragraph()
-            doc.add_picture(_render_fig_png(chart_fig), width=DocxInches(6))
+            doc.add_picture(_render_fig_png(chart_fig), width=DocxInches(5.5))
 
     if outliers:
         doc.add_heading("Potential Outliers (IQR rule)", level=1)
@@ -384,6 +384,8 @@ def build_docx_report(dataset_title, generated_at, model_name, narrative_md,
 # PPTX - designed to be presented as-is
 # ==========================================================================
 SLIDE_W_IN, SLIDE_H_IN = 13.333, 7.5  # 16:9
+CHART_MAX_W_IN = 6.5   # consistent "good size, not huge" width for any single chart
+GRID_CELL_W_IN = 5.7   # consistent width for charts shown 2-up in a grid
 
 
 def _pptx_accent_bar(slide, prs, y_in=0, height_in=1.15):
@@ -410,12 +412,38 @@ def _pptx_title_text(slide, text, top_in, left_in=0.6, width_in=SLIDE_W_IN - 1.2
     return box
 
 
-def _pptx_bullet_slide(prs, heading, items):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    _pptx_accent_bar(slide, prs)
-    _pptx_title_text(slide, heading or "Summary", top_in=0.28, size=26)
+def _pptx_footer(slide, dataset_title, page_no):
+    box = slide.shapes.add_textbox(PptxInches(0.6), PptxInches(SLIDE_H_IN - 0.45),
+                                    PptxInches(SLIDE_W_IN - 1.2), PptxInches(0.35))
+    tf = box.text_frame
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+    run = p.add_run()
+    run.text = f"{dataset_title}  ·  EDA Report"
+    run.font.size = PptxPt(9)
+    run.font.color.rgb = PptxRGBColor(0xA0, 0xAE, 0xC0)
 
-    box = slide.shapes.add_textbox(PptxInches(0.7), PptxInches(1.5), PptxInches(SLIDE_W_IN - 1.4), PptxInches(5.5))
+    box2 = slide.shapes.add_textbox(PptxInches(SLIDE_W_IN - 1.6), PptxInches(SLIDE_H_IN - 0.45),
+                                     PptxInches(1.0), PptxInches(0.35))
+    p2 = box2.text_frame.paragraphs[0]
+    p2.alignment = PP_ALIGN.RIGHT
+    run2 = p2.add_run()
+    run2.text = str(page_no)
+    run2.font.size = PptxPt(9)
+    run2.font.color.rgb = PptxRGBColor(0xA0, 0xAE, 0xC0)
+
+
+def _pptx_content_slide(prs, heading):
+    """A blank slide with the standard accent bar + title, ready for content."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _pptx_accent_bar(slide, prs)
+    _pptx_title_text(slide, heading, top_in=0.28, size=26)
+    return slide
+
+
+def _pptx_bullet_slide(prs, heading, items):
+    slide = _pptx_content_slide(prs, heading or "Summary")
+    box = slide.shapes.add_textbox(PptxInches(0.7), PptxInches(1.55), PptxInches(SLIDE_W_IN - 1.4), PptxInches(5.3))
     tf = box.text_frame
     tf.word_wrap = True
     first = True
@@ -423,7 +451,7 @@ def _pptx_bullet_slide(prs, heading, items):
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.level = 0
-        p.space_after = PptxPt(10)
+        p.space_after = PptxPt(12)
         bullet_run = p.add_run()
         bullet_run.text = "●  "
         bullet_run.font.size = PptxPt(18)
@@ -438,14 +466,56 @@ def _pptx_bullet_slide(prs, heading, items):
     return slide
 
 
+def _pptx_single_chart_slide(prs, heading, fig, max_width_in=CHART_MAX_W_IN):
+    """One chart, centered, capped to a moderate consistent width."""
+    slide = _pptx_content_slide(prs, heading)
+    left = (SLIDE_W_IN - max_width_in) / 2
+    slide.shapes.add_picture(_render_fig_png(fig), PptxInches(left), PptxInches(1.55), width=PptxInches(max_width_in))
+    return slide
+
+
+def _pptx_chart_grid_slides(prs, heading, figs_dict, max_per_slide=4):
+    """Multiple charts (e.g. histograms), always the SAME size, laid out
+    2-per-row so nothing looks oversized or inconsistent slide to slide.
+
+    eda_utils renders every histogram/bar chart at figsize=(5, 3.2), i.e. a
+    fixed 5:3.2 width:height ratio. python-pptx only lets us pin width and
+    auto-scales height to match that ratio, so the row height has to be
+    derived from the width we pick - not assumed - or rows silently
+    overflow the slide.
+    """
+    if not figs_dict:
+        return
+    items = list(figs_dict.items())
+    fig_aspect = 5 / 3.2  # width / height, matches eda_utils figsize=(5, 3.2)
+
+    top0 = 1.55
+    footer_clearance = 0.65
+    row_gap, col_gap = 0.3, 0.3
+    available_h = SLIDE_H_IN - footer_clearance - top0
+    row_h = (available_h - row_gap) / 2       # 2 rows per slide
+    cell_w = row_h * fig_aspect
+    left0 = (SLIDE_W_IN - (2 * cell_w + col_gap)) / 2
+
+    for chunk_start in range(0, len(items), max_per_slide):
+        chunk = items[chunk_start:chunk_start + max_per_slide]
+        slide = _pptx_content_slide(prs, heading)
+        for i, (_, fig) in enumerate(chunk):
+            row, col = divmod(i, 2)
+            left = left0 + col * (cell_w + col_gap)
+            top = top0 + row * (row_h + row_gap)
+            slide.shapes.add_picture(_render_fig_png(fig), PptxInches(left), PptxInches(top),
+                                      width=PptxInches(cell_w))
+
+
 def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
-                       overview, chart_fig=None) -> bytes:
+                       overview, chart_fig=None, hist_figs=None, bar_figs=None) -> bytes:
     prs = Presentation()
     prs.slide_width = Emu(int(SLIDE_W_IN * 914400))
     prs.slide_height = Emu(int(SLIDE_H_IN * 914400))
     blank = prs.slide_layouts[6]
 
-    # --- Title slide ---------------------------------------------------
+    # --- Title slide (no generated-date/model line, per request) ----------
     slide = prs.slides.add_slide(blank)
     bg = slide.shapes.add_shape(1, PptxInches(0), PptxInches(0), PptxInches(SLIDE_W_IN), PptxInches(SLIDE_H_IN))
     bg.fill.solid()
@@ -453,18 +523,12 @@ def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
     bg.line.fill.background()
     bg.shadow.inherit = False
 
-    _pptx_title_text(slide, dataset_title, top_in=2.5, size=40, align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
-    _pptx_title_text(slide, "Exploratory Data Analysis Report", top_in=3.4, size=22, bold=False,
+    _pptx_title_text(slide, dataset_title, top_in=2.9, size=40, align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+    _pptx_title_text(slide, "Exploratory Data Analysis Report", top_in=3.8, size=22, bold=False,
                       color=PptxRGBColor(0xD9, 0xE6, 0xF2), align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
-    _pptx_title_text(slide, f"Generated {generated_at}  ·  Powered by Groq ({model_name})",
-                      top_in=4.3, size=13, bold=False, color=PptxRGBColor(0xB8, 0xCC, 0xE0),
-                      align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
 
     # --- Key statistics slide ------------------------------------------
-    slide = prs.slides.add_slide(blank)
-    _pptx_accent_bar(slide, prs)
-    _pptx_title_text(slide, "Key Statistics", top_in=0.28, size=26)
-
+    slide = _pptx_content_slide(prs, "Key Statistics")
     rows = _overview_rows(overview)
     rows_n, cols_n = len(rows) + 1, 2
     table_shape = slide.shapes.add_table(rows_n, cols_n, PptxInches(2.5), PptxInches(1.8),
@@ -481,7 +545,6 @@ def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
                 r.font.bold = True
     for i, (k, v) in enumerate(rows, start=1):
         table.cell(i, 0).text, table.cell(i, 1).text = k, v
-
     # --- One slide per narrative section --------------------------------
     for heading, lines in _parse_markdown_sections(narrative_md):
         blocks = _blocks_from_lines(lines)
@@ -494,13 +557,17 @@ def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
         if items:
             _pptx_bullet_slide(prs, heading, items)
 
-    # --- Correlation heatmap slide ---------------------------------------
+    # --- Correlation heatmap: one chart, moderate consistent size --------
     if chart_fig is not None:
-        slide = prs.slides.add_slide(blank)
-        _pptx_accent_bar(slide, prs)
-        _pptx_title_text(slide, "Correlation Heatmap", top_in=0.28, size=26)
-        slide.shapes.add_picture(_render_fig_png(chart_fig), PptxInches(2), PptxInches(1.4),
-                                  width=PptxInches(SLIDE_W_IN - 4))
+        _pptx_single_chart_slide(prs, "Correlation Heatmap", chart_fig)
+
+    # --- Numeric distributions: same-size grid, not oversized -----------
+    if hist_figs:
+        _pptx_chart_grid_slides(prs, "Numeric Distributions", hist_figs, max_per_slide=4)
+
+    # --- Categorical breakdowns: same-size grid --------------------------
+    if bar_figs:
+        _pptx_chart_grid_slides(prs, "Categorical Breakdown", bar_figs, max_per_slide=4)
 
     # --- Closing slide -----------------------------------------------------
     slide = prs.slides.add_slide(blank)
@@ -512,6 +579,12 @@ def build_pptx_report(dataset_title, generated_at, model_name, narrative_md,
     _pptx_title_text(slide, "Thank You", top_in=3.0, size=36, align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
     _pptx_title_text(slide, f"{dataset_title} — EDA Report", top_in=3.9, size=16, bold=False,
                       color=PptxRGBColor(0xD9, 0xE6, 0xF2), align=PP_ALIGN.CENTER, left_in=0.8, width_in=SLIDE_W_IN - 1.6)
+
+    # --- Footers on every content slide (skip title=0 and closing=last) --
+    for i, slide in enumerate(prs.slides):
+        if i == 0 or i == len(prs.slides) - 1:
+            continue
+        _pptx_footer(slide, dataset_title, i)
 
     buf = io.BytesIO()
     prs.save(buf)
